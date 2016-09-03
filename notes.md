@@ -202,3 +202,250 @@ The workflow:
 - To working on something now, create a descriptively named branch off `master` (a feature branch).
 - Commit to that branch locally and regularly push your work to the same named branch on the server.
 - When ready for merging, issue a pull request.
+
+## Week 1
+
+### From Test Later to Test Driven
+
+First, we have "Code first, test later." Implement first, and wrap the test around it later. This is what we have done so far. This guards against regressions.
+
+Second, we have "code a little, test a little". Here the feedback loop is smaller.
+
+Third, we have "Test First" (TFD). Here we write the test first before any implementation code. Run the test first and make sure it fails, then we write the code to make the test pass. The benefit is that it challenges us to think up front about what we want to do. We lock in the behavior first, and then we write the code to hit that target.
+
+Then we have TDD. The most important term here is "driven." We use tests not only to set a target with our code, but also to interactively drive out the implementation code. This lets us gradually increase the complexity of the code.
+
+Next we have Test Driven Design--similar to TDD, but on a more system/global/architecture level: the collaboration between different objects.
+
+Any one of these isn't superior to the others. It depends on the problem we're trying to solve. As the implementation grows in complexity, we reach more toward TDD and test driven design.
+
+Here we're going to focus on code a little test a little, reaching for TFD for the more complex things, and touch a little bit on TDD.
+
+### TDD and Red-Green-Refactor
+
+First we write the backbone for our tests. Here we have a todo model, and we're going to test a method that checks if the model doesn't have a description.
+
+```ruby
+# todo_spec.rb
+
+require 'spec_helper'
+
+describe Todo do
+  describe '#name_only?' do
+    it 'returns true if the description is nil'
+    it 'returns true if the description is an empty string'
+    it 'returns false if the description is a non-empty string'
+  end
+end
+```
+
+Now we have the tests. If we run the test suite, we get three pending tests.
+
+So we set up the tests:
+
+```ruby
+# todo_spec.rb
+
+require 'spec_helper'
+
+describe Todo do
+  describe '#name_only?' do
+    it 'returns true if the description is nil' do
+      todo = Todo.new name: 'cook dinner'
+      expect(todo.name_only?).to be(true)
+    end
+
+    it 'returns true if the description is an empty string' do
+      todo = Todo.new name: 'cook dinner', description: ''
+      expect(todo.name_only?).to be(true)
+    end
+
+    it 'returns false if the description is a non-empty string' do
+      todo = Todo.new name: 'cook dinner', description: 'maybe fish?'
+      expect(todo.name_only?).to be(true)
+    end
+  end
+end
+```
+
+Here our tests fail. We need to define the method `name_only?`.
+
+```ruby
+# todo.rb
+
+class Todo < ActiveRecord::Base
+  has_many :tags
+
+  def name_only?
+  end
+end
+```
+
+The tests still fail. The first, for example, expects true and gets nil. We always start with the easiest implementation for the test to pass.
+
+```ruby
+# ...
+  def name_only?
+    true
+  end
+# ...
+```
+
+This passes for the first two tests! When the third test is written, then get a failure. This forces us to write real implementation code. This is referred to as generalization or trianglization.
+
+We can then start to implement the method:
+
+```ruby
+# ...
+  def name_only?
+    description.nil? || description == ''
+  end
+# ...
+```
+
+Here our tests pass! We now can refactor:
+
+```ruby
+# ...
+  def name_only?
+    description.blank?
+  end
+# ...
+```
+
+This is a method Rails gives us for a column that is either nil or empty.
+
+This is the red-green-refactor approach. We start with a failing test, make it pass, and then since we have a functionally working component, we can refactor it accordingly.
+
+### Member and Collection Routes
+
+#### Collection routes
+
+Consider a todo app's router:
+
+```ruby
+TodoApp::Application.routes.draw do
+  root to: 'todos#index'
+
+  resources :todos, only: [:index]
+end
+```
+
+Say we want to implement a search path within `todos`, say `/todos/search`. This has nothing to do with a specific todo, so we use a `collection` route.
+
+```ruby
+# ...
+  resources :todos, only: [:index] do
+    collection do
+      get 'search', to: 'todos#search'
+    end
+  end
+# ...
+```
+
+This creates a route that matches `/todos/search`, mapped to `get`, with the named path `search_todos`.
+
+#### Member routes
+
+Member routes, like collection routes, are nested under a certain resource. Rather than the index path, they are appended after a specific resource id: `/todo/1/highlight`.
+
+```ruby
+resources :todos, only: [:index] do
+  # ...
+
+  member do
+    post 'highlight', to: 'todos#highlight'
+  end
+end
+```
+
+This creates a route that matches `/todos/:id/highlight`, mapped to `get`, iwth the named path `highlight_todo`.
+
+### Custom Form Builders
+
+Suppose we have we have a Todo app, and want to create a form to create a todo. Here's the HAML for that form:
+
+```haml
+%section.new_todo
+  %h3 Add a new todo
+  = form_for @todo do |f|
+    = f.label :name
+    = f.text_field :name
+    = f.label :description
+    = f.text_area :description, rows: 6
+    &br
+    = f.submit 'Add a Todo'
+```
+
+If we want to display validation errors attached to the object, we need to add something to the form:
+
+```haml
+/ ...
+  = form_for @todo do |f|
+    - if @todo.errors?
+      / ...
+
+```
+
+This would be very cumbersome, especially if we have a lot of places in which we need this. To get around this, we can use custom form builders.
+
+```ruby
+# app/helpers/my_form_builder.rb
+
+class MyFormBuilder < ActionView::Helpers::FormBuilder
+  def label(method, text = nil, options = {}, &block)
+    errors = object.errors[method.to_sym]
+    if errors
+      text += " <span class=\"error\">#{errors.first}</span>"
+    end
+    super(method, text.html_safe, options, &block)
+  end
+end
+```
+
+Here we are overwriting the standard form builder, so we can append the errors to the form's labels. To use it we can modify our call to `form_for` thusly:
+
+```haml
+%section.new_todo
+  %h3 Add a new todo
+  = form_for @todo, builder: MyFormBuilder do |f|
+    / ...
+```
+
+If we get validation errors, they'll appear next to the label:
+
+```
+Name `can't be blank`
+```
+
+If we don't want to do this every single time we create a form, we can just create a wrapper helper in `ApplicationHelper`:
+
+```ruby
+# app/helpers/application_helper.rb
+
+module ApplicationHelper
+  # Make sure it has the same parameters.
+  def my_form_for(record, options = {}, &proc)
+    form_for(record, options.merge!({ builder: MyFormBuilder }), &proc)
+  end
+end
+```
+
+We merge in the builder option so we can just make a call to `my_form_for`.
+
+### Form Builders in the Wold
+
+#### Formtastic
+
+Gives us `semantic_form_for`. Allows us to forgo labels.
+
+#### simple_form
+
+Gives us `simple_form_for`. Integrates with Bootstrap and Zurb Foundation. Only really works if your style is similar to the default. If you want to customize, you need to fight with the DSL.
+
+It has a default mapping, so it allows us to generate form elements based on the datatypes.
+
+#### bootstrap_form
+
+Gives us `bootstrap_form_for`. It doesn't have a lot of DSL with it, but it allows us to add bootstrap's classes to elements and format it nicely. Keeps us from writing the verbose markup that comes with bootstrap. It automatically creates the control groups for us automatically so we can just add fields generated by the form builder.
+
