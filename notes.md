@@ -1014,3 +1014,259 @@ Fabricator :user do
   email { Faker.Internet.email }
 end
 ```
+
+## Week 3
+
+### Growing Complexity Guided by Tests
+
+Going back to our todo app, let's say we want to add complexity. For example, we want our app to parse out parts of the todo's title ('study at home' is recognized as being at the location 'home'), and automatically creates tags based on that information (location:home, in this case). We're going to cover how we want to increase complexity, and further, how we'll recover from dead ends.
+
+We start by writing tests for `TodosController`, in the case of `POST create`. We create a context:
+
+```ruby
+# todos_controller_spec.rb
+
+# ...
+  context 'with inline locations' do
+    it 'creates a tag with one location' do
+      post :create, todo: { name: 'cook at home' }
+      expect(Tag.all.map(&:name)).to eq(['location:home'])
+    end
+  end
+# ...
+```
+
+We're hitting the create action with a new todo, and we're expecting the tags to be parsed.
+
+Then we go to the `create` action in the controller:
+
+```ruby
+# todos_controller.rb
+
+# ...
+  def create
+    @todo = Todo.new params[:todo]
+    if @todo.save
+      location_string = @todo.name.split('at').last.strip
+      @todo.tags.create name: "location:#{location_string}"
+    # ...
+  end
+# ...
+```
+
+This passes! Next we want to write another test case to create tages with two tags:
+
+```ruby
+# todos_controller_spec.rb
+
+# ...
+  it 'creates two tags with two locations' do
+    post :create, todo: { name: 'cook at home and work' }
+    expect(Tag.all.map(&:name)).to eq(['location:home', 'location:work'])
+  end
+# ...
+```
+
+This test fails. If we have multiple locations, we want to take them out and separate them further.
+
+```ruby
+# todos_controller.rb
+
+# ...
+  def create
+    @todo = Todo.new params[:todo]
+    if @todo.save
+      location_string = @todo.name.split('at').last.strip
+      locations = location_string.split('and').map(&:strip)
+      locations.each do |location|
+        @todo.tags.create name: "location:#{location}"
+      end
+    # ...
+  end
+# ...
+```
+
+It isn't apparent in these notes, but we're making small steps toward making the tests pass. We want to keep track of where we are so we don't have to hack away at the implementation code.
+
+So now we want to test multiple tags:
+
+```ruby
+# todos_controller_spec.rb
+
+# ...
+  it 'creates two tags with multiple locations' do
+    post :create, todo: { name: 'cook at home, work, school, and library' }
+    expect(Tag.all.map(&:name)).to eq(['location:home', 'location:work', 'location:school', 'location:library'])
+  end
+# ...
+```
+
+So we want to be able to follow natural english. We'll need a more flexible way of tokenizing the string. The answer is a regex! `/and|\,/i` will match `and` and `,`, but we'll need to worry about the Oxford comma, since it'll create empty strings. So, we can just put a guard clause when we go to create the tag:
+
+```ruby
+# todos_controller.rb
+
+# ...
+  def create
+    @todo = Todo.new params[:todo]
+    if @todo.save
+      location_string = @todo.name.split('at').last.strip
+      locations = location_string.split(/and|\,/i).map(&:strip)
+      locations.each do |location|
+        @todo.tags.create name: "location:#{location}" unless location.blank?
+      end
+    # ...
+  end
+# ...
+```
+
+### Interactive Debugging for Solution Discovery
+
+When we finish a feature we typically want to do a sanity test by running it in a browser. Our current code has a bug where it'll create a location tag even if we don't specify an 'at' clause.
+
+Instead of diving into the code, we'll write a test case that wraps around the bug.
+
+Outside the context of `'with inline locations'`, we put a test case:
+
+```ruby
+# todos_controller_test.rb
+
+# ...
+  it 'does not create tags without inline locations' do
+    post :create, todo: { name: 'cook' }
+    expect(Tag.count).to eq(0)
+  end
+# ...
+```
+
+With our current code this test fails.
+
+We have the line which seems to be problematic:
+
+```ruby
+# todos_controller.rb
+
+# ...
+  location_string = @todo.name.split('at').last.strip
+# ...
+```
+
+We drop a `binding.pry` after that line of code. To run the code within the context of the test case, we use the line number when we use the `rspec` command. In the video's case, it's line 53:
+
+```
+rspec ./spec/controllers/todos_controller_spec.rb:53
+```
+
+When we examine `location_string`, we find out that it is `'cook'`. We'd expect it to be blank or nil. When we call split, if nothing matches the delimiter we specify, it just returns a one-element array with the same string.
+
+Instead of split, we can use `slice` with a regex:
+
+```ruby
+'cook'.slice /.*at(.*)/, 1
+```
+
+This will capture anything that occurs after an 'at'. We can replace our existing line:
+
+```ruby
+# todos_controller.rb
+
+# ...
+  def create
+    @todo = Todo.new params[:todo]
+    if @todo.save
+      location_string = @todo.name.slice(/.*at(.*)/, 1).strip
+      locations = location_string.split(/and|\,/).map(&:strip)
+      locations.each do |location|
+        @todo.tags.create name: "location:#{location}" unless location.blank?
+      end
+    # ...
+  end
+# ...
+```
+
+If there's nothing being returned from the regex, it'll try to call `strip` on `nil`. So we can just call `try`:
+
+```ruby
+location_string = @todo.name.slice(/.*at(.*)/, 1).try(:strip)
+```
+
+The next line will throw, so we can create an `if` branch:
+
+```ruby
+# todos_controller.rb
+
+# ...
+  def create
+    @todo = Todo.new params[:todo]
+    if @todo.save
+      location_string = @todo.name.slice(/.*at(.*)/, 1).try(:strip)
+      if location_string
+        locations = location_string.split(/and|\,/i).map(&:strip)
+        locations.each do |location|
+          @todo.tags.create name: "location:#{location}" unless location.blank?
+        end
+      end
+    # ...
+  end
+# ...
+```
+
+Our tests now pass. It'll probably be beneficial to put that location parsing into another method.
+
+### Respond to Feature Changes
+
+Say we have our todo app and have launched it. Users are finding that if they create a todo named something like `eat an apple`, the `at` is parsed as a location delimiter, and is tagged under `location:an apple`.
+
+We now how to deal with this. We create a new test case:
+
+```ruby
+  it 'does not create tags with "at" in a word without inline locations' do
+    post :create, todo: { name: 'eat an apple' }
+    expect(Tag.count).to eq(0)
+  end
+```
+
+This will fail at first.
+
+The fix is pretty easy. We need to make it so it only parses `at`s that are their own words.
+
+```ruby
+location_string = @todo.name.slice(/.*\bat\b(.*)/, 1).try(:strip)
+```
+
+`\b` denotes the boundary of a word.
+
+Now, we notice that 'get good at swimming' triggers our location tag creation. This is really part of a phrase. This is not so much a bug as it is a flaw in the design of our application. We didn't think that it could be a phrase or something similar.
+
+So we need another direction. Instead of using `at` as our tokenizer, we need to do something else.
+
+One solution is to only use the upcase `AT`, and we will just need to train our user to use the app in this fashion.
+
+First we need to change our specification. We create a spec:
+
+```ruby
+  it 'creates a tag with upcase AT' do
+    post :create, todo: { name: 'shop AT the apple store' }
+    expect(Tag.all.map(&:name)).to eq(['location:the apple store'])
+  end
+```
+
+If we implement the code to pass this test, we have to know that we'll break all the other tests. That's OK.
+
+```ruby
+location_string = @todo.name.slice(/.*\bAT\b(.*)/, 1).try(:strip)
+```
+
+This now breaks our other tests, so we need to adjust all our other tests to make it so they're using the new upcase `AT`.
+
+It's very common that we'll have to change a lot of code for these direction changes.
+
+This is the reason why we create our initial test before we change the code. It serves as our protection--as long as it passes, we know that the new feature specification is implemented. We can safely go back and change our other tests.
+
+### Transactions
+
+Going to Myflix, we want to make sure the list order values in our queue are integers.
+
+The traditional Rails form lets us submit to one record, and if there are errors they'll bounce back. In the queue, we're updating list orders as a batch operation. All the items in the queue have to be saved, or, if there is a validation error with any of the items, we have to roll back the items. This is the concept of transactions.
+
+A transaction is a batch operation that makes it so all items have to succeed. If one or more fails, all the changes are rolled back.
