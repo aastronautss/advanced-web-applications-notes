@@ -1270,3 +1270,117 @@ Going to Myflix, we want to make sure the list order values in our queue are int
 The traditional Rails form lets us submit to one record, and if there are errors they'll bounce back. In the queue, we're updating list orders as a batch operation. All the items in the queue have to be saved, or, if there is a validation error with any of the items, we have to roll back the items. This is the concept of transactions.
 
 A transaction is a batch operation that makes it so all items have to succeed. If one or more fails, all the changes are rolled back.
+
+### Structural Refactor
+
+We want to refactor `TodosController#create`, since we have a lot of logic for creating tags that shouldn't be in a controller. A controller is more of a coordinator, delegating tasks to different models. Let's push it down to the model level.
+
+We create a `save_with_tags` method on the `Todo` model, and move the logic from the controller to that method:
+
+```ruby
+# todo.rb
+
+# ...
+  def save_with_tags
+    location_string = @todo.name.slice(/.*\bAT\b(.*)/, 1).try :strip
+
+    if location_string
+      locations = location_string.split(/\,|and/).map(&:strip)
+      locations.each do |location|
+        @todo.tags.create name: "location:#{location}"
+      end
+    end
+  end
+# ...
+```
+
+Now we call that method from the controller:
+
+```ruby
+# todos_controller.rb
+
+# ...
+def create
+  # ...
+  if @todo.save_with_Tags
+  # ...
+end
+# ...
+```
+
+We know that we want to return truthy if the save is successful, falsey otherwise. So we change the method (we also remove the references to `@todo`:
+
+```ruby
+# todo.rb
+
+# ...
+  def save_with_tags
+    if save # Save the todo, which is a new record
+      location_string = name.slice(/.*\bAT\b(.*)/, 1).try :strip
+
+      if location_string
+        locations = location_string.split(/\,|and/).map(&:strip)
+        locations.each do |location|
+          tags.create name: "location:#{location}"
+        end
+      end
+      true # make sure it returns a truthy value
+    else
+      false # return false and don't make the tags if it fails
+    end
+  end
+# ...
+```
+
+Running rspec, our tests pass. With a comprehensive test suite, we can refactor with confidence.
+
+The option to write tests for our new method isn't very straightforward. The new code is covered by our existing controller tests. If it's a simple refactor like this one, we don't really need to move the test. However, if we're using the new code elsewhere or implementing new features with it, we'd want to write tests at the model level and move the relevant tests from the controller level to the model level.
+
+Now, our method is a little to long, so let's refactor it.
+
+```ruby
+# todo.rb
+
+# ...
+  def save_with_tags
+    if save # Save the todo, which is a new record
+      create_location_tags
+      true # make sure it returns a truthy value
+    else
+      false # return false and don't make the tags if it fails
+    end
+  end
+# ...
+
+# ...
+  private
+
+  def create_location_tags
+    location_string = name.slice(/.*\bAT\b(.*)/, 1).try :strip
+
+    if location_string
+      locations = location_string.split(/\,|and/).map(&:strip)
+      locations.each do |location|
+        tags.create name: "location:#{location}"
+      end
+    end
+
+  end
+# ...
+```
+
+This makes our code more declarative and easier to read.
+
+### Skinny Controller, Fat Model
+
+We've moved a bunch of logic from the controller to the model. This is a very common refactor in rails, as well as a well-known architectural principle: Skinny Controller, Fat Model.
+
+Our controller needs to stay pretty simple, while the model should be the one that knows how to do stuff.
+
+Reference:
+
+http://weblog.jamisbuck.org/2006/10/18/skinny-controller-fat-model
+
+### Further Notes on SCFM Structure
+
+We typically don't want to have functionality that handles form input (e.g. params hashes) living on the model layer, since we don't want the model tightly coupled with forms. This is the reason we have the MVC architecture: so we can have a controller to handle the communication between the views/router and the models.
