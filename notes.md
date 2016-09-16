@@ -1384,3 +1384,296 @@ http://weblog.jamisbuck.org/2006/10/18/skinny-controller-fat-model
 ### Further Notes on SCFM Structure
 
 We typically don't want to have functionality that handles form input (e.g. params hashes) living on the model layer, since we don't want the model tightly coupled with forms. This is the reason we have the MVC architecture: so we can have a controller to handle the communication between the views/router and the models.
+
+### Rspec Macros
+
+In our Todos app, we've added some simple authentication, in which if we see if the user is logged in and redirect to the dashboard if he/she is.
+
+```ruby
+class PagesController < ApplicationController
+  def front
+    redirect_to todos_path if current_user
+  end
+end
+```
+
+We want to add a `before_action` to each action related to dealing with the todo list, and this will break our tests due to lack of authenticated.
+
+Requiring authentication is pretty common with our tests, since a lot of our controller tests use actions that will require authentication. We could set a user with each of our specs, but we can instead use a macro to DRY them up.
+
+First we can use a `before` (in this example we're modifying the `TodosController` specs):
+
+```ruby
+# todos_controller_spec.rb
+
+describe TodosController do
+  before do
+    john = Fabricate :user
+    session[:user_id] = john.id
+  end
+
+  # The rest of the specs
+end
+```
+
+Since we're putting the `before` outside of all of our `describe`s, it will be run before all of our specs on that controller.
+
+This doesn't look quite as obvious what it's doing, so we can move the logic into a macro. This way we can use this in multiple specs.
+
+We create a new directory:
+
+```
+mkdir spec/support
+```
+
+Rspec automatically loads everything in the `support` dir. Here we can put a file called `macros.rb`.
+
+```ruby
+# spec/support/macros.rb
+
+def set_current_user
+  john = Fabricate :user
+  session[:user_id] = john.id
+end
+```
+
+In our `before` we can simply make a call to that method.
+
+```ruby
+# todos_controller_spec.rb
+
+describe TodosController do
+  before { set_current_user }
+
+  # ...
+end
+```
+
+Sometimes we need to refer to the user, so we can create another macro called `current_user`:
+
+```ruby
+# macros.rb
+
+# ...
+def current_user
+  User.find session[:user_id]
+end
+```
+
+### Shared Examples in Rspec
+
+Now that we have some macros for signing in, we want to test that for all of our actions, the user is redirected to the login page. To do this, we first need to clear the session, since our `before` to create the session is called before each test case.
+
+We create another macro called `clear_current_user`:
+
+```ruby
+# macros.rb
+
+# ...
+def clear_current_user
+  session[:user_id] = nil
+end
+```
+
+Now we can make an expectation for our `todos_controller GET index` for the case where there is no signed-in user.
+
+```ruby
+# todos_controller_spec.rb
+
+# ...
+  describe 'GET index' do
+    # ...
+
+    it 'redirects user to the root path when they are not signed in' do
+      clear_current_user
+      get :index
+      expect(response).to redirect_to(root_path)
+    end
+  end
+# ...
+```
+
+This gives us a better sematics to work with using the macros for both cases. Now we want to test this same case for all of our other actions for which we want to require a logged in user:
+
+We could copy and paste this, but rspec gives us the ability to keep it DRY using shared examples.
+
+We create a file in `spec/support` called `shared_examples.rb`.
+
+```ruby
+# shared_examples.rb
+
+shared_examples 'require_sign_in' do
+  it 'redirects to the front page' do
+    expect(response).to redirect_to(root_path)
+  end
+end
+```
+
+Now in our spec for our `todos_controller#index` action, we can replace the example with:
+
+```ruby
+# todos_controller_spec.rb
+
+# ...
+  describe 'GET index' do
+    # ...
+
+    it_behaves_like 'require_sign_in'
+  end
+# ...
+```
+
+This isn't enough, since our shared example doesn't clear the session or hit `get :index`. So we can add a context for this case:
+
+```ruby
+# todos_controller_spec.rb
+
+# ...
+  describe 'GET index' do
+    # ...
+
+    context 'not signed in' do
+      before do
+        clear_current_user
+        get :index
+      end
+
+      it_behaves_like 'require_sign_in'
+    end
+  end
+# ...
+```
+
+Now our tests pass. This doesn't seem much better, since we're just moving a single line around. We could add the before block to the shared example, but the problem is that `get :index` is unique to our `index` action. There is a way we can pass in the code to be executed within the shared example. In this instance we'll use a block, which we will pass in to `it_behaves_like`:
+
+```ruby
+# todos_controller_spec.rb
+
+# ...
+  describe 'GET index' do
+    # ...
+
+    context 'not signed in' do
+      it_behaves_like 'require_sign_in' do
+        let(:action) { get :index }
+      end
+    end
+  end
+# ...
+```
+
+We then add a call to the action to our shared example:
+
+```ruby
+# shared_examples
+shared_examples 'require_sign_in' do
+  it 'redirects to the front page' do
+    clear_current_user
+    action
+    expect(response).to redirect_to(root_path)
+  end
+end
+```
+
+We can also remove the context:
+
+```ruby
+# todos_controller_spec.rb
+
+# ...
+  describe 'GET index' do
+    # ...
+
+    it_behaves_like 'require_sign_in' do
+      let(:action) { get :index }
+    end
+  end
+# ...
+```
+
+Now we can put those three lines of code wherever we need it, swapping `action` out for whatever we need! This is a much clearer way to test for cross-cutting concerns. We can use shared examples on the model level as well as the controller level.
+
+### Feature Specs
+
+So far we've written specs for models and controllers. We're obviously missing something. We haven't tested views and things like routes, helpers, and mailers.
+
+In Rspec, there are specs for each of these components, so we could write specs for these components. However, we don't necessarily have to. We use a Feature Spec to test the integration of these components. We're operating on the browser level, mimicing the user's experience in browser. We can simiulate form fills, button clicks, and expect things to be rendered to the screen.
+
+Feature specs are broken up into different features. Every feature in the app has a test for the user's experience of a feature. It is a way of vertical integration, penetrating the entire stack and exercising them all in integration.
+
+Another kind of integration is a "horizontal" integration. With this, we test multiple requests and responses that go across multiple different controllers. This make sure the entire request works properly. This is called a 'Request spec' in rspec.
+
+When we work with features, we use the Capybara gem which we'll cover in the next section. Then, we work on the level of user experience.
+
+With request specs, we test a specific route, and expect the response to render a template or return something or redirect. We can follow redirects and expect the body to contain some content. When we're working with request specs, we aren't working on the browser level. There are no form filling or button clicks. We just fill in hashes.
+
+In this course we aren't going to use request specs. If we want to test integration that goes beyond a single req/res, we're just going to write feature specs. This is because we want to make sure that a business process works.
+
+### Capybara
+
+Capybara is a way to simulate a real user's interaction with the application through the browser. There are two styles to use it with rspec/rails. First, we can use the rspec convention, with `describe`, `before`, `it`, etc.. Another style relates to feature specs. Instead of `describe`, we use `feature` and pass it a description of the feature name. `before` is replaced with `background`, and `it` is replaced with `scenario`, and `let` becomes `given`. This is just a different syntax that reads a little better w/r/t a feature spec (an acceptance test).
+
+We can swap out drivers for Capybara. The default is `RackTest`, which is very fast. It doesn't really fire up a real browse--rather, it uses a headless driver. `RackTest` doesn't support javascript, so if JS is part of the user experience, we need to use `Selenium` or `Capybara-webkit`. `Selenium` fires up a real brower and we can watch how things are happening. This is pretty slow, so we can alternatively use `Capybara-webkit`. This allows us to do JS testing, which allows us to test JS code. It's headless and faster than `Selenium`, but slower than `RackTest`.
+
+#### The DSL
+
+##### Interaction
+
+- `visit` to visit a route.
+- `click_link`, `click_button`, `click_on` to simulate a user clicking a link
+- `fill_in`, `choose`, `check`, `uncheck`, `attach_file`, `select`, etc. for form controls.
+- `find_field`, `find_link`, `find_button`, `find`, `all` return specific elements wrapped in objects that we can call methods like `#value`, `#visible?`, and `#click` on.
+- use `within`, pass it a CSS selector and a block if we want to interact with stuff within a certain part of the page
+- We can use `page.execute_script` and pass it a string with some JS code to execute some JS.
+
+##### Verification
+
+- `page.has_selector?`, `page.has_xpath?`, `page.has_css?`, `page.has_content?` to check if the page has stuff.
+  - These can be used with Rspec magic matchers, e.g. `page.should have_selector`, etc.
+
+This is a start, and Capybara is a pretty big topic. We'll go through a very simple feature spec with Capybara.
+
+### First Feature Spec
+
+To install Capybara, we add `gem 'capybara'` to the `:test` group. We then add `require 'capybara/rails'` to our spec helper. We'll use the new Capybara style for our feature specs. We create a directory `spec/features`, and create our first feature spec file `user_signs_in.rb`.
+
+```ruby
+# user_signs_in.rb
+
+require 'spec_helper'
+
+feature 'user signs in' do
+  scenario 'with existing username' do
+    visit root_path
+    fill_in 'Username', with: 'john'
+    click_button 'Sign in'
+    page.should have_content 'John Doe'
+  end
+end
+```
+
+Before this test can pass, we need to make sure we have a user `john` in the database.
+
+```ruby
+# user_signs_in.rb
+
+# ...
+feature 'user signs in' do
+  background do
+    User.create username: 'john', full_name: 'John Doe'
+  end
+
+  # ...
+end
+```
+
+In the video, we run the test and find that it couldn't find the field 'Username'. This is because the label was not connected to the input field. Capybara is trying to find a label linked to a text input field. The label in the markup was a simple `<p>` tag. To fix this, we just needed to use a form helper to match the label to the field:
+
+```haml
+= form_tag sessions_path do
+  = label_tag :username, 'Username'
+  = text_field_tag :username
+  /- ...
+```
+
+For `fill_in`, we can use the text in the label, or the `name` attribute on the element. Capybara will look for either a name, an ID, or text. Typically, the best practice is to use the label text since it's easier to read.
