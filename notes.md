@@ -1677,3 +1677,366 @@ In the video, we run the test and find that it couldn't find the field 'Username
 ```
 
 For `fill_in`, we can use the text in the label, or the `name` attribute on the element. Capybara will look for either a name, an ID, or text. Typically, the best practice is to use the label text since it's easier to read.
+
+## Week 4
+
+### Three styles of BDD with Rails
+
+We have been learning the following:
+
+1. Mockup -> View Template
+2. Controller tests: specs for each controller action. This may or may not drop down to the model level.
+3. Model tests: The conroller will drive the models. The controller tests will requre the models, routes, and db migrations to be set up. When the controller level is finished we pop up back to the controller level and make sure the view template correctly renders.
+4. After several of these circles, we do some integration tests. This is a layer on top of the view templates and controllers--the outermost layer.
+
+This process is called "Meet in the middle."
+
+We also have "inside out": We start from the models/migrations/db. We do model tests, then pop up to the controller, making sure the controller is setting the right data. Then we look at the view level or integration tests.
+
+Then there's the "outisde in" approach. We start from the integration level. This is a little different from our normal horizontal integration in which we test across multiple requests. Instead, this is more of a vertical integration test. These specs written in a very business-level description. We want to think of the business value that we're delivering. This drives insight into what we want to accomplish, challenging us to figure out the controllers, models, etc.
+
+Another term for outside-in is "ABBD", for "Acceptance BDD". This process is used a lot by consultancies, since it's useful for working with clients. When you have a client, you have features specified very clearly to you in a business language. "I want a certain user to be able to do this," with the stakeholder writing the acceptance level. Then as a developer, we take one of these and write an integration spec, which drives out step by step the implementation details for us. If the integration spec passes, we know the integration is implemented from a business standpoint. We submit it to the client, and they accept it.
+
+The advantage of ABBD is that it flows more naturally to the business requirements, letting that drive out the internals of our application. We don't need to think too much ahead. The hurdle of this is that this requres a very proficient grasp of Rails and testing in general. You have to write out the very high level integratoin spec, which requires several technologies to work well together. Some people use Cucumber for this, or Rspec feature specs. This takes some exercise to get familiar with.
+
+If we do inside-out, we can just focus on a local model: start small, and then we expand. However, it isn't as clear what we are driving toward. It requires some assumptions that can be wrong when we work to the outside. This is use more in product-type shops where it's more it's about incrementally adding things to an existing product.
+
+We use the meet-in-the-middle approach at LS. We have the advantage of the outside-in approach, writing integration specs when we have internals that work well together. This is not as rigorous as the outside-in approach, but we don't write as many integration specs, which run the slowest.
+
+### HMT and HABTM
+
+In rails, we typically want to look at `has_many :through` when we have a M:M mapping between our models. It is a pattern that the join table `belongs_to` both of its associated models, with the joined models having `has_many` of both the other joined model and the join table model.
+
+Another way to model this is the `has_and_belongs_to_many` association. This requires our join table to have a specific naming convention, but does not requre an additional join model that we have to specifically name.
+
+We typically want to use HMT, since while it's simpler to use HABTM, it's a good exercise to actually name the join table in the context of our application. This is good, because it will give our data and logic a place to live. We can include additional data to the data, as well. Also, it's more work to do this, but not _that_ much work.
+
+### MyFlix social networking features
+
+We can view a user's profile, in which we can see the videos they have collected in their queue, as well as their queue. We can also follow a user--clicking the `Follow` button bings us to the "people I follow" page, where we can see some brief data on that user, as well as a link to unfollow them.
+
+### Self Referential Associations
+
+Sometimes we want to do something called a "self join": a record referring to another record on the same table.
+
+We can do this through a simple `has_many` association, but it's useful to name it something with meaning which isn't the name of the table. Using the RailsGuides example, an Employee can have many subordinates, which are also employees. The easiest way to accomplish this is to just use `has_many :employees`, with an `employee_id` column in the table. This doesn't really give us the meaning we are attempting to put across. So, we specify a name for each side of the relation:
+
+```ruby
+class Employee < ActiveRecord::Base
+  has_many :subordinates, class_name: 'Employee', foreign_key: 'manager_id'
+  belongs_to :manager, class_name: 'Employee'
+end
+```
+
+This points the association back to the same model. Note that `belongs_to :manager` doesn't specify a foreign key, because there is a column in the database with the corresponding name, `manager_id`, per the Rails convention.
+
+### Sending Email
+
+Back to our Todos app. Whenever we add a Todo, we want to send out an email to the current signed-in user. This will take place in the `TodosController`. Rails provides `ActionMailer` to accomplish this.
+
+We make a new mailer under `app/mailers/app_mailer.rb` and extend `ActionMailer`.
+
+```ruby
+class AppMailer < ActionMailer::Base
+
+end
+```
+
+We define a method to send out notification emails:
+
+```ruby
+class AppMailer < ActionMailer::Base
+  def notify_on_new_todo(user, todo)
+    mail from: 'info@mytodoapp.com',
+      to: user.email,
+      subject: 'You created a new todo!'
+  end
+end
+```
+
+We provide all the header information to the `mail` method. For our body, `ActionMailer` uses something similar to view templates. So, we can store our todo to a `@todo` instance variable.
+
+```ruby
+# app_mailer.rb
+
+class AppMailer < ActionMailer::Base
+  def notify_on_new_todo(user, todo)
+    @todo = todo
+
+    mail from: 'info@mytodoapp.com',
+      to: user.email,
+      subject: 'You created a new todo!'
+  end
+end
+```
+
+To store the template, we create a template:
+
+```
+mkdir app/views/app_mailer
+touch notify_on_new_todo.html.erb
+```
+
+```erb
+<!doctype html>
+<html>
+<body>
+  <p>
+    You created a new todo!
+  </p>
+  <p>The todo is <%= @todo.name %></p>
+</body>
+</html>
+```
+
+Then, in our controller:
+
+```ruby
+# todos_controller.rb
+
+# ...
+  def create
+    # ...
+    if @todo.save_with_tags
+      AppMailer.notify_on_new_todo(current_user, @todo).deliver
+      # ...
+    end
+    # ...
+  end
+# ...
+```
+
+Note that we call `deliver` on the object returned by our call to `notify_on_new_todo`. This will send the email.
+
+
+When we invoke that action via a request to the related route, the server's logs the email's information.
+
+### Email Configurations
+
+The ActionMailer configuration gives us a lot of control over how the email is delivered. This can be handled differently depending on the environment we are using.
+
+Let's add some configuration settings for our `ActionMailer` action. Since this is our local environment, we don't want to send real emails. We aren't going to add smtp settings to development, but we can do so with our production enviroment. In `config/environments/production.rb`, we can copy/paste the boilerplate Gmail example from the RailsGuides entry on `ActionMailer`:
+
+```ruby
+# production.rb
+
+# ...
+  config.action_mailer.delivery_method = :smtp
+
+  config.action_mailer.smtp_settings = {
+    address:              'smtp.gmail.com',
+    port:                 587,
+    domain:               'example.com',
+    user_name:            '<username>',
+    password:             '<password>',
+    authentication:       'plain',
+    enable_starttls_auto: true  }
+# ...
+```
+
+We can change all of this based on our gmail settings. When we deploy this to production, it will send out emails for real.
+
+In the development environment, we can also set the delivery method. If nothing is set, it is all dumped in the server logs. However, there is a gem called `letter_opener` (which we add to the gemfile under `development`) which we can set the delivery method as in `development`:
+
+```ruby
+# development.rb
+
+# ...
+  config.action_mailer.delivery_method = :letter_opener
+# ...
+```
+
+Make sure we restart the server when we change the gemfile. This gem will present the email in a browser tab. This is much nicer to look at than to sift through the server logs.
+
+### Handling Sensitive Account Info
+
+There are a lot of different ways to keep passwords and API keys from being hardcoded into our codebase. If we leave our Gmail username and password in plain text in our source code, anybody who has access to the code (on Github, etc) will have access to our gmail credentials.
+
+We get around this by storing them as environment variables on our server. Fewer people will have access to this information in this case.
+
+With Heroku, this is as easy as running the following command:
+
+```
+heroku config:add ENV_VAR_KEY=env_var_val OTHER_ENV_VAR_KEY=other_env_var_val
+```
+
+The keys are what we want them to be, but it's useful to name them something useful. For example, with our Gmail SMTP config, we can use `ENV['gmail_username']` and `ENV['gmail_password']`.
+
+Other ways to do this is detailed on `railsapps.github.com/rails-env/environment-variables.html`. We can set UNIX environment variables, use the Figaro gem, or use the `local_env.yml` file. We want to make sure none of the files associated with these methods are checked in to our source control, which means in our case adding them to `.gitignore`.
+
+### Testing Email Sending
+
+In our `TodosController`, we have a line to send an email in the `create` action. In our test, we want to test the sending of emails under this action. We create a context in our spec for that action called 'email sending'. Here we outline those specs.
+
+```ruby
+# todos_controller_spec.rb
+
+# ...
+  describe 'POST create' do
+    # ...
+    context 'email sending' do
+      it 'sends out the email'
+
+      it 'sends to the right recipient'
+
+      it 'has the right content'
+    end
+    # ...
+  end
+# ...
+```
+
+Now we expand:
+
+```ruby
+# todos_controller_spec.rb
+
+# ...
+  describe 'POST create' do
+    # ...
+    context 'email sending' do
+      it 'sends out the email' do
+        post :create, todo: { name: 'shop AT the apple store' }
+        ActionMailer::Base.deliveries.should_not be_empty
+      end
+
+      it 'sends to the right recipient' do
+        post :create, todo: { name: 'shop AT the apple store' }
+        # We call `last` rather than `first` since we're just adding elements
+        # to an array.
+        message = ActionMailer::Base.deliveries.last
+
+        # We stuff it in an array because we can put many recipients into
+        # a mailer's header. Consequently, `#to` gets returned as an array.
+        message.to.should == [alice.email]
+      end
+
+      it 'has the right content' do
+        post :create, todo: { name: 'shop AT the apple store' }
+        message = ActionMailer::Base.deliveries.last
+        message.body.should include('shop AT the apple store')
+      end
+    end
+    # ...
+  end
+# ...
+```
+
+These tests are mostely not for TDD, but are here to check for regressions.
+
+### Setting Random Tokens
+
+How to set random tokens to identify resources
+
+This solves a similar problem that a slug solves. We don't ever really want to give out information regarding the database structure. Instead, we can use a random toaken to idenfity our resources. Lots of websites already do this, like Youtube and Trello.
+
+We'll do this for the `Todo` resources in our Todo app. First we create a migration:
+
+```
+rails g migration add_token_to_todos
+```
+
+Then we write the mgiration.
+
+```ruby
+# The generated migration .rb
+
+# ...
+  add_column :todos, :token, :string
+# ...
+  add_index :todos, :token
+# ...
+```
+
+Then we migrate.
+
+```
+rake db:migrate
+```
+
+Make sure we restart the server after we do this.
+
+In our `Todo` model, we need to add an instance method called `#to_param`. `#to_param` is called whenever we pass the model to a named path (e.g. `todo_path(todo)`). By default, it returns the `id` of the model. We can overwrite it to return the token instead.
+
+```ruby
+# todo.rb
+
+# ...
+  def to_param
+    token
+  end
+# ...
+```
+
+Now we need to automatically set the token when we generate the model. We can add a `before_create` to the model to accomplish this. This only needs to be done once, so we don't use, e.g., `before_save`.
+
+```ruby
+# todo.rb
+
+# ...
+  before_create :generate_token
+# ...
+  def generate_token
+
+  end
+# ...
+```
+
+We can use the Ruby module `SecureRandom` to do this. One method we can call is `base64` to make sure the return is textual. A better method, though, is `urlsafe_base64`, which allows us to use the token as part of the URL.
+
+```ruby
+# todo.rb
+
+# ...
+  def generate_token
+    self.token = SecureRandom.urlsafe_base64
+  end
+# ...
+```
+
+Since it is run before the model is created, we don't need to call `save`.
+
+When we first try to run this, we get a RoutingError, which means Rails has failed to generate the path. The reason is that our existing data doesn't have any data in the `token` column. We'll need to migrate this data when we run our migration. Let's modify our recently-created migration to handle this.
+
+```ruby
+# that_same_generaged_migration_from_above.rb
+
+# ...
+  add_column # etc...
+  Todo.all.each do |todo|
+    todo.token = SecureRandom.urlsafe_base64
+    todo.save
+  end
+# ...
+```
+
+This is OK if we don't have a lot of data in the database. If that were the case we'd instead want to use SQL to do the same thing.
+
+```
+rake db:rollback db:migrate
+```
+
+Now we have retrofitted the exisitng data to include our tokens.
+
+Now, when we try to use any action requiring a spcific record in `todos`, we'll get an error. This is because our logic for setting the instance variable is still looking for an `id`. We need to modify this code to make it look for the token instead.
+
+```ruby
+# todos_controller.rb
+
+# ...
+  @todo = Todo.find_by token: params[:id]
+# ...
+```
+
+### Adding Password Resets to MyFlix
+
+I'm putting the an assignment-related portion to these notes, in order to just describe the workflow of resetting passwords. The password reset process goes as follows:
+
+1. There is a link to reset the password on the login page. The user clicks that link.
+2. The user is brought to the "forgot password" form, in which they enter their email address and submit the form.
+3. The user is brought to the "confirm password reset" page, letting them know to check their inbox.
+4. The system sends an email to that email address with a link pointing to something like `password_reset/tokentokentokentoken`. The user clicks on that link.
+5. The user is brought the "reset password" form, and they enter a new password and submits the form.
+6.
+
+The token should only be valid before the user resets their password. If they reset their password using the token, we need to expire that token.
