@@ -2040,3 +2040,281 @@ I'm putting the an assignment-related portion to these notes, in order to just d
 6.
 
 The token should only be valid before the user resets their password. If they reset their password using the token, we need to expire that token.
+
+## Week 5
+
+### Concerns
+
+So in our Todo app, we've specified that we want to generate a token every time we want to create a todo. If we have multiple models where we want this to happen, we wouldn't want to repeat the implementation of token generation. In a software application, every piece of knowledge should have one authorative definition. So we want to extract the process of generating tokens and take it to one place, so we can refer to that process with every model to which this applies.
+
+First we make a module called `tokenable`, placing `tokenable.rb` in the `lib` directory.
+
+```ruby
+# lib/tokenable.rb
+
+module Tokenable
+  extend ActiveSupport::Concern
+end
+```
+
+Extending ActiveSupport::Concern is a way for Rails to orgainize cross-cutting concerns in our applications.
+
+We add an `included` call in the module:
+
+```ruby
+# lib/tokenable.rb
+
+module Tokenable
+  extend ActiveSupport::Concern
+
+  included do
+    before_create :generate_token
+  end
+end
+```
+
+This calls the includer's `before_create` class method, passing in the usual args. We can then define `generate_token` in our module:
+
+```ruby
+# lib/tokenable.rb
+
+module Tokenable
+  extend ActiveSupport::Concern
+
+  included do
+    before_create :generate_token
+  end
+
+  private
+
+  def generate_token
+    self.token = SecureRandom.urlsafe_base64
+  end
+end
+```
+
+In our model, we can just call `include`:
+
+```ruby
+# todo.rb
+
+class Todo < ActiveRecord::Base
+  include Tokenable
+
+  # ...
+end
+```
+
+That piece of knowledge is abstracted as a concern, and now we can share that logic with other AR models.
+
+In order for this to work, we need to `require` the file, since Rails doesn't load the `lib` directory automatically:
+
+```ruby
+# todo.rb
+
+require_relative '../../lib/tokenable'
+
+class Todo < ActiveRecord::Base
+  # ...
+end
+```
+
+There are some more options for including the `tokenable.rb` file. We can simply place it in the `app/models` directory, since that directory is automatically loaded. The other option is to open the `application.rb` config file, adding the following to `Application` class:
+
+```ruby
+# config/application.rb
+
+# ...
+module TodoApp
+  class Application < Rails::Application
+    # ...
+    config.autoload_paths << "#{Rails.root}/lib"
+  end
+end
+```
+
+`autoload_paths` is an array, so we need to push that path onto it using `#<<` or `#push`. Now we don't have to use `require_relative` in our model file.
+
+### Email Service Providers
+
+Gmail imposes lots of restrictions on sending emails, so email is something we should absolutely offload to a transactional email provider. This is because having emails arrive to a user's inbox rather than spam is such a critical part of many applications.
+
+LaunchSchool recommends Mailgun and Postmark, since we want to opt for deliverability, which is where these two services really shine. We'll use Mailgun here at LaunchSchool.
+
+### Background Jobs
+
+In our Create action, we send out an email synchronously. Typically, email sending isn't very fast since it typically relies on a 3rd party service. Therefore, before the email sends the controller won't generate a response. The creation of a new todo will feel a little slow. Furthermore, this will block all subsequent requests, queuing them up.
+
+The email sending doesn't have to happen synchronously with the req/res, since it's not time-sensitive. We can offload the email sending to a Background Process.
+
+Here's how a typical Rails application works re: processes. We have one or multiple foreground processes (also known as web processes), which handle incoming requests. We also have one or many background processes (aka worker processes), which handle background jobs.
+
+Web processes each have an instance of rails, which handle incoming requests. If there is a job that doesn't need to be included in the response, they can offload the job to worker processes. Worker processes act like a queue, processed one by one.
+
+There are several frameworks that can help with this. First, we have `Resque`, which came out as a response to other background job solutions.
+
+Sidekiq is a newer, high performance solution. Here we'll take a look at it in detail. We're going to make the email sending in our todo app asynchronous:
+
+We install the gem:
+
+```ruby
+gem 'sidekiq'
+```
+
+```
+bundle install
+```
+
+Sidekiq already comes with an `ActiveMailer` extension, so we just need to call `delay` before we call the mailer's method in question:
+
+```ruby
+# todos_controller.rb
+
+class TodosController < ApplicationController
+  # ...
+
+  def create
+    # ...
+    AppMailer.delay.notify_on_new_todo(current_user, @todo)
+    # ...
+  end
+
+  # ...
+end
+```
+
+Here we just call `delay` and remote `deliver` from the end. If we do this, our tests related to the action will fail, because the test is looking for deliveries.
+
+To fix this, we need to look at the actual email, so we need to require `sidekiq/testing` to test our workers inline, and add some lines of config. So we require the module in `spec_helper.rb`
+
+```ruby
+# spec_helper.rb
+
+# ...
+require 'capybara/rails'
+require 'sidekiq/testing'
+
+# ...
+
+Sidekiq::Testing.inline!
+```
+
+Now our tests will pass.
+
+### Procfile and Foreman
+
+When working with background processes locally, we need to run both the rails server as well as the sidekiq worker process. When we want to do this on the production server, we use a Procfile. The `Procfile` allows us to define all processes that will run on our server.
+
+Web services will go like this:
+
+```
+web: bundle exec rails server -p $port
+```
+
+This is the default rails server. For worker processes Heroku uses the following as a default:
+
+```
+worker: bundle exec rake jobs:work
+```
+
+We obviously have to change this for sidekiq. The convention for a `Procfile` goes like this:
+
+```
+<Process type>: <Command to launch process>
+```
+
+When we push to Heroku, these processes will automatically start. We can go one step further by developing locally with Foreman. We can just use `foreman start` if we have a `Procfile` defined.
+
+With Heroku, an increase in the number of processes running may increase the price of the deployment.
+
+### Unicorn
+
+Unicorn is a popular alternative to the default Rails server. By default, Rails will only handle one request at a time. Unicorn makes it very easy to start multiple instances of the Rails server.
+
+We install Unicorn the normal way, and use the file `config/unicorn.rb` to configure the server.
+
+In the procfile, we need to use a different command:
+
+```
+web: bundle exec unicorn -p $PORT -c ./config/unicorn.rb
+```
+
+### Continuous Integration
+
+(Copied from the lesson itself)
+
+By this time, you should be aware and comfortable with automated tests and the benefits. Up until now, we're relying on developer's discipline to always ensure tests pass locally before they deploy features. This is probably ok in small and high-trust teams, but in larger teams you typically see Continuous Integration (CI) introduced as part of the development process.
+
+In his article on Continuous Integration, Martin Fowler defines continuous integration as:
+
+> Continuous Integration is a software development practice where members of a team integrate their work frequently, usually each person integrates at least daily - leading to multiple integrations per day.
+
+The problem that CI solves is to force integration on a regular basis. For example, you may have just finished a feature on my_feature branch and have had all the tests pass locally. You open a PR and your fellow coworkers are happy with the way the code looks. Github shows the PR can be automatically merged without conflict - so you do that, merge it back to the master branch and ready to deploy the feature!
+
+The danger of this workflow is that while you are working on your feature, someone else could have just finished their feature and pushed to the master branch to Github, and your new feature never integrated with this new piece of code.
+
+A Continuous Integration solution would watch your repository and force integration (running the entire test suite on the CI server) whenever necessary.
+
+Once we have our CI server set up to monitor our repository, it'll pull the latest code and run the entire test suite every time we push code to any branch on Github (when you work with a CI server, you want to make sure that every push should always make the tests pass) and notify you on the results. The CI server also runs every time we merge our pull request to the master branch to ensure integration.
+
+A CI server helps us catch integration errors before they reach production, and the earlier we catch errors, the less costly we can fix them.
+
+A CI solution doesn't eliminate the necessity to run your tests locally - your will lose friends quickly if you constantly push code that "breaks the build" and have everyone notified. However, in cases of long running test suites, it is acceptable to run only the tests pertaining to the new feature built, and have the CI server to run the entire test suite to catch any potential regression. Most modern CI services allow you to run the tests in parallel (with a paid plan, typically) so it could run your tests several times faster.
+
+### Continuous Delivery
+
+Continuous Delivery (CD) or sometimes known as Continuous Deployment goes one step beyond CI to automatically deploy features when the new code passes the continuous integration phase. Continuous Delivery encourages small and incremental software updates over big and infrequent releases to shorten the feedback loop and fix bugs earlier.
+
+Let's look at an example development workflow that has both CI and CD enabled, based on the Github Flow process:
+
+- we pull the latest code from Github
+- we create a new feature branch and develop a new feature
+- after we finish the feature, we push it to a branch with the same name on Github
+- we create a PR from this branch to the staging branch.
+- we wait for the the CI server to ensure all tests pass.
+- we allow the CI server to automatically deploy the code from the staging branch to our staging server
+- we perform sanity tests on our staging server
+- we create a PR from the staging branch to the master branch on Github
+- this will trigger another round of integration and if it passes, the CI server will automatically deploy the code to the production server.
+
+If adopted by everyone in the development team, this process will make sure our master branch is always in sync with the production server and new features are also always build on top of what's on the production server.
+
+### Setting Up a CD Thing with Circle CI
+
+For this assignment, you are going to enable Continuous Delivery with Circle CI.
+
+Here are the steps:
+
+- create a `staging` branch locally if you don't have it yet.
+- in Circle CI, follow `Project settings` for your project and select `Heroku Deployment` under Continuous Deployment
+- configure the Heroku API key. (Get it from your Heroku account page)
+- associate Heroku SSH key with your Circle account so Circle can have the authority to deploy to Heroku on your behalf.
+- create a `circle.yml` file in your projects root directory and make sure your adjust `production_app_name` & `staging_app_name` to your own app name.
+
+Here is an example of a circle.yml file that you can use:
+
+```yaml
+machine:
+  ruby:
+    version: 2.1.5
+deployment:
+  production:
+    branch: master
+    commands:
+      - heroku maintenance:on --app production_app_name
+      - heroku pg:backups capture --app production_app_name
+      - git push git@heroku.com:production_app_name.git $CIRCLE_SHA1:refs/heads/master
+      - heroku run rake db:migrate --app production_app_name
+      - heroku maintenance:off --app production_app_name
+  staging:
+    branch: staging
+    commands:
+      - heroku maintenance:on --app staging_app_name
+      - git push git@heroku.com:staging_app_name.git $CIRCLE_SHA1:refs/heads/master
+      - heroku run rake db:migrate --app staging_app_name
+      - heroku maintenance:off --app staging_app_name
+```
+
+Note: you should change the Ruby version to the version you're using for this project.
+
+This code should be pretty self explanatory - this allows Circle to monitor your staging branch and deploy to the staging server, and monitor your master branch to deploy to the production server. It'll run migrations for you and for the production server, it also automatically backs up the database before a deploy.
