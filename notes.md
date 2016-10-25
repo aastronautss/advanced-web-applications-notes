@@ -2318,3 +2318,511 @@ deployment:
 Note: you should change the Ruby version to the version you're using for this project.
 
 This code should be pretty self explanatory - this allows Circle to monitor your staging branch and deploy to the staging server, and monitor your master branch to deploy to the production server. It'll run migrations for you and for the production server, it also automatically backs up the database before a deploy.
+
+## Week 6
+
+### Separating Actors
+
+What if we wanted to be able to have admins for our todo application? It is very typical for an application to have several types of users within our application, typically called 'actors,' because they interact with the application in different ways. How we can add admin functions?
+
+One way to do this is conditionals within our controllers:
+
+```ruby
+if current_user.admin?
+  @todos = Todo.all
+else
+  @todos = current_user.todos
+end
+```
+
+This is very cumbersome if we have this type of conditional check throughout our application--even sometimes in the views.
+
+Another way is to have a separate action--say `admin_index` vs `index`. The issue with is that if we want our admins to be able to do more things, or even have more actors, then it becomes very cumbersome, and the controller will blow up. We also have to manage access control for different actors, which requires additional `before_action`s.
+
+Instead, we can add namespaces to our `routes.rb` file.
+
+```ruby
+# routes.rb
+
+TodoApp::Application.routes.draw do
+  # ...
+  namespace :admin do
+    resources :todos, only: [:index, :destroy]
+  end
+  # ...
+end
+```
+
+This allows us to specify the resources to which each actor has access, as well as how we want to present data to the actor, and how the actor can interact with the resource. So, if we have multiple actors, we can have multiple namespaces for these.
+
+So how do these namespaces work? If we do a `rake routes`, we notice that we've added an `admin_todos` named route under `/admin/todos`, which points to the `admin/todos` controller, `#index` action.
+
+So, all the admin urls are going to start with `admin`. To set up the controller, we're going to put the contoller under `app/controllers/admin` subdir.
+
+```
+mkdir app/controllers/admin
+touch app/controllers/admin/todos_controller.rb
+```
+
+```ruby
+# app/controllers/admin/todos_controller.rb
+
+class Admin::TodosController < ApplicationController
+
+end
+```
+
+Notice how this is namespaced under the `Admin` module. This is how Rails differentiates between the two controllers.
+
+```ruby
+# app/controllers/admin/todos_controller.rb
+
+class Admin::TodosController < ApplicationController
+  def index
+    @todos = Todo.all
+  end
+end
+```
+
+We need to create an admin, so we need to add an `admin` boolean column to our `users` table. Once we do that, we can just add a user as an admin through the console for now.
+
+```ruby
+User.create username: 'admin', full_name: 'Admin User', email: 'admin@example.com', admin: true
+```
+
+We need to wire the app to point the user to the `admin_todos_path`:
+
+```ruby
+# sessions_controller.rb
+
+class SessionsController < ApplicationController
+  def create
+    # ...
+    redirect_to current_user.admin? ? admin_todos_path : todos_path
+  end
+end
+```
+
+We need to create a view template for this. The convention for the view template is `admin/todos` under the `views` path. We add a `index.html.haml` file in that dir. We can pretty much copy/paste from the other view template, perhaps adding a display for the user to which each todo belongs.
+
+### Securing Access
+
+With our current setup, any user can go to the `admin/todos` path to view any of the admin stuff. There are a few ways to lock this down.
+
+First we can create a `before_action` for each of our controllers under `admin` so that only admin can see the admin areas. This is fine for a simple app, but we may have lots of controllers namespaced with `Admin`, and it's very easy to miss this. This is bad, since admin stuff is typically something we want to secure.
+
+We can instead create a controller called `AdminsController` that our admin-namespaced controllers can inherit. So first we subclass that controller:
+
+```ruby
+# admin/todos_controller.rb
+
+class Admin::TodosController < AdminsController
+ # ...
+end
+```
+
+We can then create an `admins_controller.rb` file under `controllers`:
+
+```ruby
+# admins_controller
+
+class AdminsController < ApplicationController
+  before_filter :ensure_admin
+
+  def ensure_admin # this is coded wrong but I'm too lazy to come back to it.
+    flash[:danger] = 'You do not have access to that area.'
+    redirect_to root_path unless current_user.admin?
+  end
+end
+```
+
+We can even go one step further and make all our controllers that require signed in users to have the `ensure_sign_in` `before_action` is called, by creating an `AuthenticatedController` that the relevant controllers (like `TodosController`) can subclass. Furthermore, since we want our admin stuff to require signed in users, we can subclass `AdminsController` with `AuthenticatedController`!
+
+### Amazon S3
+
+A cloud-based storage service! If your website serves a lot of content like images, etc, or if you allow users to upload content, this is a good solution for doing so.
+
+You just need to create an account and a bucket. S3 has a web interface for storing S3 objects, but it's also useful to user Cyberduck or Transmit.
+
+### File Uploading with Carrierwave
+
+Carrierwave is the go-to library for file uploading in the Ruby and Rails community.
+
+You add the gem and run bundler, and that will give us a generator that will allow us to generate uploaders. Carrierwave uses uploaders which will manage all the infrastructure concerns for file uploading, including file uploading, processing, as well as storage.
+
+Once we generate an uploader, it will create a class that subclasses from `CarrierWave::Uploader::Base`. We can specifies the storage:
+
+```ruby
+class AvatarUploader < CarrierWave::Uploader::Base
+  storage :file
+end
+```
+
+If we've defined an uploader, we just need to create an instance and store it like so:
+
+```ruby
+uploader = AvatarUploader.new
+uploarder.store! my_file # where my_file is an instance of a CW file
+
+# retrieve a file
+uploader.retrieve_from_store! 'my_file.png'
+```
+
+We get `store` for permanent storage, and `cache` for temp storage. We can use `cache` help with validation.
+
+With ActiveRecord, we can mount our uploaders to columns in the database using `mount_uploader`:
+
+```ruby
+class User < ActiveRecord::Base
+  mount_uploader :avatar, AvatarUploader
+end
+```
+
+This allows us to call some methods to accomodate for file storage:
+
+```ruby
+u = User.new
+
+# either...
+u.avatar = params[:file]
+
+# or...
+u.avatar = File.open 'somewhere'
+
+# then we can just:
+u.save!
+
+# this lets us call some cool methods
+u.avatar.url #=> '/url/to/file.png'
+u.avatar.current_path #=> '/path/to/file.png'
+u.avatar.intentifier #=> 'file.png'
+```
+
+By default Carrierwave saves file uploads locally, but you can change the directory by defining a `store_dir` method and a `cache_dir` method, returning a string with a path to that directory.
+
+Configuring mostly works similarly to that. You can add a whitelist for uploads to, say, a certain set of file extensions:
+
+```ruby
+class MyUploader < CarrierWave::Uploader::Base
+  def extension_white_list
+    %w(jpg jpeg gif png)
+  end
+end
+```
+
+We can also add multiple versions of the same file. For example, we can have image thumbnails. We just include `CarrierWave::RMagick` which is just a wrapper for the `ImageMagick` library. In order for this to work, we need to install ImageMagick both locally and on our server.
+
+Once that's done, we just need to make calls to `process` and `version`:
+
+```ruby
+class MyUploader < CarrierWave::Uploader::Base
+  include CarrierWave::RMagick
+
+  process resize_to_fit: [800, 800]
+
+  version :thumb do
+    process resize_to_fill: [200, 200]
+  end
+end
+```
+
+The first `process` call processes every file that gets stored, while the second will create a thumbnail version of that file.
+
+```ruby
+uploader = AvatarUploader.new
+
+uploader.store! my_file
+
+uploader.url #=> '/url/to/my_file.png'
+uploader.thumb.url #=> '/url/to/thumb_my_file.png'
+```
+
+We can provide a default url for our images by defining a `defualt_url` file.
+
+When we test uploaders, we want to test them each separately. CarrierWave even comes with its own matchers for rspec.
+
+#### Amazon S3
+
+We just need to install the `fog` gem to use Carrierwave with S3. Once we do that we just need to configure in `lib/carrierwave/storage/fog.rb`. A full sample of this is listed in the docs.
+
+### Full File Upload Workflow
+
+#### 1. Create and Mount Uploaders
+
+```ruby
+# video.rb
+
+class Video < ActiveRecord::Base
+  # ...
+  mount_uploader :large_cover, LargeCoverUploader
+  mount_uploader :small_cover, SmallCoverUploader
+  # ...
+end
+```
+
+```ruby
+# app/uploaders/large_cover_uploader.rb
+
+class LargeCoverUploader < CarrierWave::Uploader::Base
+
+end
+```
+
+```ruby
+# app/uploaders/small_cover_uploader.rb
+
+class SmallCoverUploader < CarrierWave::Uploader::Base
+
+end
+```
+
+#### 2. Make sure sizes are right
+
+```ruby
+# app/uploaders/large_cover_uploader.rb
+
+class LargeCoverUploader < CarrierWave::Uploader::Base
+  include CarrierWave::MiniMagick
+
+  process resize_to_fill: [665, 375]
+end
+```
+
+```ruby
+# app/uploaders/small_cover_uploader.rb
+
+class SmallCoverUploader < CarrierWave::Uploader::Base
+  include CarrierWave::MiniMagick
+
+  process resize_to_fill: [166, 236]
+end
+```
+
+### 3. Set up files to upload to S3
+
+```ruby
+# config/initializers/carrier_wave.rb
+
+CarrierWave.configure do |config|
+  if Rails.env.staging? || Rails.env.production?
+    config.storage    = :aws
+    config.aws_bucket = ENV.fetch('S3_BUCKET_NAME')
+    config.aws_acl    = 'public-read'
+
+    # The maximum period for authenticated_urls is only 7 days.
+    config.aws_authenticated_url_expiration = 60 * 60 * 24 * 7
+
+    config.aws_credentials = {
+      access_key_id:     ENV.fetch('AWS_ACCESS_KEY_ID'),
+      secret_access_key: ENV.fetch('AWS_SECRET_ACCESS_KEY'),
+      region:            ENV.fetch('AWS_REGION') # Required
+    }
+  else
+    config.storage = :file
+    config.enable_processing = Rails.env.development?
+  end
+end
+```
+
+### Collecting Credit Card Payments
+
+There are a lot of moving parts w/r/t accepting payments--merchant accounts, payment gateways, and automation. All this is compounded by the requirement for PCI compliance.
+
+If you're building a small app, this all becomes too prohibitive. Stripe is a major pioneer in this space, making it so you don't need a merchant account or payment gateway. Furthermore, the customer's information doesn't ever flow through your application server. Instead, it produces a token which you store on a server.
+
+#### First Charge with Stripe
+
+We want to stay in test mode for this purpose.
+
+First we include strip in the Gemfile:
+
+```ruby
+# Gemfile
+
+# ...
+gem 'stripe'
+# ...
+```
+
+First we get our API keys and add them to `figaro`.
+
+First let's test things out in the console:
+
+```ruby
+# rails c
+
+Stripe.api_key = ENV['STRIPE_API_KEY']
+
+Stripe::Charge.create(
+  amount: 400,
+  currency: 'usd',
+  card: {
+    number: '4242424242424242',
+    exp_month: '3',
+    exp_year: '2014',
+    cvc: 314
+  },
+  description: 'Charge for test@example.com'
+)
+```
+
+Remember that the amount is in cents!
+
+#### Accepting Payments with Checkout Widget
+
+So this is how we do a simple Stripe charge. We'll focus on how to collect card information from our customers. The easiest way to do this is to add a widget to our view, which will pop up a modal for the customer to enter our card information.
+
+With our todo app, we can create a resource for payments:
+
+```ruby
+# routes.rb
+
+# ...
+resources :payments, only: [:new]
+# ...
+```
+
+Now we can create a view for that resource:
+
+```haml
+-# app/views/payments/new.html.haml
+
+%p Thank you for your support.
+= form_tag payments_path do
+```
+
+We can simply include a JS tag from the Stripe docs from `payments -> checkout`:
+
+```haml
+-# app/views/payments/new.html.haml
+
+%p Thank you for your support.
+= form_tag payments_path do
+  %script(src="https://checkout.stripe.com/checkout.js" class="stripe-button"
+      data-key="pk_test_Oktlq7NDL2eOfbcgF09Sfpm3" data-amount="999" data-name="Support Todo App!" data-description="Thank you for your donation!" data-image="https://stripe.com/img/documentation/checkout/marketplace.png" data-locale="auto")
+```
+
+The docs will automatically include your public key in the sample snippet.
+
+This will generate a button on the page letting the user pay with a card. Now, this goes to Stripe and comes back. However, this will also send a request through our app, so we need to add a `:create` action to the resource in our `routes.rb` file.
+
+We also need to add a `PaymentsController`. If we through a `pry` in the `create` action, we can see the params, where we can see a `stripeToken` key. This is a token representation of our credit card, which is stored at Stripe.
+
+In our `create` action, we'll start by copy/pasting some code from Stripe's docs, under 'Creating Charges.'
+
+```ruby
+class PaymentsController < ApplicationController
+  Stripe.api_key = ENV['STRIPE_API_KEY']
+
+  # Get the credit card details submitted by the form
+  token = params[:stripeToken]
+
+  # Create a charge: this will charge the user's card
+  begin
+    charge = Stripe::Charge.create(
+      :amount => 999, # Amount in cents
+      :currency => "usd",
+      :source => token
+    )
+
+    flash[:success] = 'Thank you for your support!'
+    redirect_to new_payment_path
+  rescue Stripe::CardError => e
+    flash[:danger] = e.message
+    redirect_to new_payment_path
+  end
+end
+```
+
+This code takes the token from the `params` hash and starts a `begin/rescue` block, hitting the Stripe server and checking to see if the charge runs. If the card is declined, we can return a message.
+
+So here's how the Stripe workflow works with the Checkout widget:
+
+1. User fills and submits the form with their credit card information.
+2. The form sends the card information to Stripe, which then returns a unique token corresponding to the card.
+3. A `post` request is submitted to the application server with the token in the params.
+4. The application server calls `Stripe::Charge.create`, sending the token to the server with the amount to charge.
+5. Two things can happen:
+  a. If the card is declined, a `Stripe::CardError` is thrown, which we can catch.
+  b. If the card is charged, we can continue with the script.
+
+Notice how none of this attaches any data to our user's record.
+
+#### Accepting Payments with Custom Forms
+
+We sometimes want to include the payment information in our interface, rather than on a widget.
+
+In our Todo app, we have a `form_tag`, with fields for the card number, security code, etc. `stripe.js` gives us the ability to do this.
+
+First we need to include the script. To do this, we just add a `yeld :head` line in the head of our main layout:
+
+```haml
+-# app/views/layouts/application.html.haml
+
+-# ...
+  %head
+    -# ...
+    = yield :head
+    -# ...
+-# ...
+```
+
+Then, we can add a `content_for` line in our view corresponding to accepting payments:
+
+```haml
+-# app/views/payments/new.html.haml
+
+= content_for :head do
+  %script(src='https://js.stripe.com/v1/')
+  :javascript
+    Stripe.setPublishableKey('the stripe publishable key!');
+  = javascript_include_tag 'payments'
+
+-# the rest of the payment form...
+```
+
+We now need to call `createToken`. We create a JS file called `payments.js` in `app/assets/javascripts`. In the video we use a boilerplate JS file, which does the following:
+
+1. Hijack the submit of the form with the id `#payment-form`.
+2. In the event handler's callback function:
+  a. Disable the `submit` tag (by calling `prop`, passing in `'disabled', true`) to make sure the button is only clicked once.
+  b. Call `Stripe.createToken`, passing in the credit card info as a JS object, then the variable `stripeResponseHandler` (defined below).
+    i. Note that we don't have any `name` attributes attached to our credit card info field--furthermore, we set `name` to `nil` in our auto-generated fields for our expiration month and year. Therefore, we need to select the elements by the `class` attribute. This is all so that none of the credit card information gets posted to our server when the form gets submitted. This is for PCI compliance--the credit card information never flows through our own server.
+    ii. Note also that `createToken` is an async call, and the callback function, `stripeResponseHandler`, is passed as the second parameter.
+  c. Return false.
+3. We define `stripeResponseHandler`, which takes variables named `status` and `response`. This will be the callback for our `createToken` call.
+  a. If the `response` has a truthy `error` property, we add some information to the page regarding that error, also re-enabling the submit button.
+  b. Else, we set `token` to the `id` property of `response`, adding a hidden `input` element, with the name `stripeToken` and the value of `token`. Then we submit the form (`$(form).get(0).submit();`).
+
+Here's `payments.js` in full:
+
+```javascript
+$(function() {
+  $('#payment-form').submit(function(e) {
+    e.preventDefault();
+    var $form = $(this);
+    $form.find('.payment-submit').prop('disabled', true);
+    Stripe.createToken({
+      number: $('.card-number').val(),
+      cvc: $('.card-cvc').val(),
+      exp_month: $('.card-expiry-month').val(),
+      exp_year: $('.card-expiry-year').val()
+    }, stripeResponseHandler);
+    return false;
+  });
+
+  var stripeResponseHandler = function(status, response) {
+    var $form = $('#payment-form');
+
+    if (response.error) {
+      $form.find('.payment-errors').text(response.error.message);
+      $form.find('.payment-submit').prop('disabled', false);
+    }
+    else {
+      var token = response.id;
+      $form.append($('<input type="hidden" name="stripeToken" />').val(token));
+      $form.get(0).submit();
+    }
+  }
+});
+```
