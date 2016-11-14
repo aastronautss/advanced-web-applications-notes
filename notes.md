@@ -3767,3 +3767,129 @@ Another example: let's look at the `Credit` class. It looks like our instance me
 The `#save` method goes beyond the current `Credit` object. It relies on a collaborator, namely a `User` object. In order to do a true unit test of this object, we can use a test double for the collaborator object. We can then just test that the test double receives a certain message. In this case we want to make sure that the `user` instance variable receives `current_credit_balance=`, taking in `credit_balance` as a parameter, as well as `save`.
 
 Mocks allow us to scope our tests to limit them to individual units. They also help us hone our object oriented design skills. If we find ourselves creating too many mocks, that means our unit has too many collaborators. Just by observing that pain will lead us to a better-designed system.
+
+### Sandi Metz's Testing Talk
+
+The three kinds of messages, the two flavors of each kind, and how we should test them:
+
+- Incoming Query
+  - Test by making assertions about what they send back. (Assert result)
+  - Test the interface, not the implementation.
+- Incoming Command
+  - Test by makking assertions about _direct public_ side effects.
+  - By 'direct' we mean the responsibility of the last ruby class involved.
+  - Incoming messages are the only place where we make assertions about values.
+- Sent to Self
+  - Don't test! This does not add any value.
+  - Tests that assert that we send methods to self bind us to a specific implementation.
+- Outgoing Query
+  - Don't test these!
+  - Don't test that we've sent them!
+  - The reason for this is that these messages are invisible to the rest of the app.
+- Outgoing Command
+  - These are a little different, since in most cases these message MUST be sent. It creates side effects upon which others depend.
+    - Do not test these side effects.
+    - This creates a dependency between the object and the distant side effect. It also is technically an integration test.
+  - Test instead with mocks.
+    - The test depends on a message, testing at the 'nearest edge'.
+    - You do not have to run all the code between the message and the distant side effect.
+    - This is fast and stable.
+    - Break the rule when side effects are stable and cheap (close).
+
+These tests allow us to write a minimal amount of tests while keeping 100% test coverage.
+
+Trust collaborators, insist on simplicity.
+
+#### On the fragility of mocks
+
+API drift happens, and this is natural. We just have to implement mocks directly.
+
+A mock is a test double, playing the role of some object in our real app. They promise that they implement a common API with the acutal objects. Our doubles must keep that promise, keeping them in sync with the API.
+
+How do we do this? There are new libs on Github that allow us to use mocks and stubs in our tests and know with confidence that they won't stray from the actual API.
+
+## Week 8
+
+### Model Serialization
+
+Serialization is the conversion of an object into a string to be sent to another system. We can only send strings over the wire. With any ActiveRecord object we can just use `#to_json`, which just gives keys and values for every column in the table.
+
+Let's define a method `#as_json`:
+
+```ruby
+# video.rb
+
+def as_json(options = {})
+  # ...
+end
+```
+
+This method will return a hash. Whenever we call `#to_json`, it will turn the hash returned by `#as_json` into a JSON string. There are a couple of ways we can do this. We can explicitly define a hash:
+
+```ruby
+# video.rb
+
+def as_json(options = {})
+  { title: title }
+end
+```
+
+or we can call `#super`, passing in an `options` hash, for `only` or `except`, etc.:
+
+```ruby
+# video.rb
+
+def as_json
+  super(only: [:title])
+end
+```
+
+The reason we want to serialize is that we want to communicate between the Rails app and the elasticsearch server. The elasticsearch server is most often located on a different machine, so we have to turn the video into a JSON format to send over the wire. We could update `#as_json`, which is good, since we only want to send the data we want to search on. The less data we send, the faster and more performant the query will be when we search against the elasticsearch server.
+
+The issue is that this converts all `#to_json` calls on a `Video` object to this. We may also need to communicate with other systems or serve as an API server, which will require another set of attributes.
+
+To get around this, we just need to define `#as_indexed_json`:
+
+```ruby
+# video.rb
+
+def as_indexed_json(options = {})
+  as_json only: [:title]
+end
+```
+
+This is given to us by `Elasticsearch::Model`, but we can overwrite it. By default, it just calls `#as_json` with no options.
+
+#### Associations
+
+If we have an association in our search (video.reviews.body, for example), we need to make sure the elasticsearch index updates when a review is added:
+
+```ruby
+# review.rb
+
+class Review < ActiveRecord::Base
+  # ...
+  belongs_to :video, touch: true
+  # ...
+end
+```
+
+This updates the `updated_at` field on the associated video, triggering elasticsearch callbacks.
+
+#### Relevance Weights
+
+If we want to assign weights to different fields, we need to change our options hash we pass into `__elasticsearch__.search`:
+
+```ruby
+search_definition = {
+  query: {
+    multi_search: {
+      query: q,
+      fields: ['title^100', 'description^50'],
+      operator: 'and'
+    }
+  }
+}
+```
+
+We boost with the `^` operator.
